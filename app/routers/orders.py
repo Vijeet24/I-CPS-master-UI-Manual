@@ -14,6 +14,7 @@ from app.schemas_orders import (
     MqttStatusResponse,
     OrderDetailResponse,
     OrderSummaryResponse,
+    SendAuditMessageResponse,
     SimulatePurchaseOrderRequest,
     WorkflowStatsResponse,
 )
@@ -54,6 +55,23 @@ def list_orders(db: Session = Depends(get_db)):
 def list_message_audit(limit: int = 100, db: Session = Depends(get_db)):
     entries = OrderRepository(db).list_audit_messages(limit=limit)
     return [serialize_audit(entry) for entry in entries]
+
+
+@router.post("/audit/{audit_id}/send", response_model=SendAuditMessageResponse)
+def send_audit_message(audit_id: int):
+    try:
+        result = order_service.send_audit_message(audit_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+    return SendAuditMessageResponse(
+        status=result["status"],
+        audit_id=result["audit_id"],
+        message_id=result["message_id"],
+        topic=result.get("topic"),
+    )
 
 
 @router.get("/sample/purchase-order")

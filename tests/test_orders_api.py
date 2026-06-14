@@ -112,3 +112,23 @@ def test_duplicate_po_is_idempotent(client):
     orders = client.get("/api/orders").json()
     matching = [item for item in orders if item["correlation_message_id"] == po["message_id"]]
     assert len(matching) == 1
+
+
+def test_send_audit_message(client):
+    client.post("/api/orders/simulate", json={"payload": _sample_po()})
+    audit = client.get("/api/orders/audit").json()
+    outbound = [entry for entry in audit if entry["direction"] == "OUTBOUND"]
+    assert outbound
+    ack = next(entry for entry in outbound if "855" in entry["message_type"])
+    assert ack["status"] == "GENERATED"
+
+    with patch("app.services.order_service.mqtt_service") as mqtt_mock:
+        response = client.post(f"/api/orders/audit/{ack['id']}/send")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "sent"
+    mqtt_mock.publish_json.assert_called_once()
+
+    audit_after = client.get("/api/orders/audit").json()
+    ack_after = next(entry for entry in audit_after if entry["id"] == ack["id"])
+    assert ack_after["status"] == "SENT"

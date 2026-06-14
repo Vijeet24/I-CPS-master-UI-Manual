@@ -97,3 +97,10 @@ class MqttStatusResponse(BaseModel):
 
 class SimulatePurchaseOrderRequest(BaseModel):
     payload: dict
+
+
+class SendAuditMessageResponse(BaseModel):
+    status: str
+    audit_id: int
+    message_id: str
+    topic: Optional[str] = None

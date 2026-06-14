@@ -66,4 +66,5 @@ export const api = {
   simulatePurchaseOrder: (payload) =>
     apiRequest("/api/orders/simulate", { method: "POST", body: JSON.stringify({ payload }) }),
   forceShipOrder: (id) => apiRequest(`/api/orders/${id}/ship`, { method: "POST" }),
+  sendAuditMessage: (id) => apiRequest(`/api/orders/audit/${id}/send`, { method: "POST" }),
 };

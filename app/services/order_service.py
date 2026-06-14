@@ -17,6 +17,11 @@ from app.repository import OrderRepository
 
 logger = logging.getLogger(__name__)
 
+OUTBOUND_TOPICS = {
+    "EDI_855_PURCHASE_ORDER_ACK": lambda: settings.mqtt_ack_topic,
+    "EDI_856_ADVANCE_SHIP_NOTICE": lambda: settings.mqtt_asn_topic,
+}
+
 
 class OrderService:
     def process_inbound_po(self, payload: dict, source: str = "MQTT") -> dict:
@@ -82,9 +87,6 @@ class OrderService:
                 status="GENERATED",
                 correlation_id=correlation_id,
             )
-
-            if settings.mqtt_enabled and source == "MQTT":
-                mqtt_service.publish_json(settings.mqtt_ack_topic, ack_payload)
 
             repo.commit()
             self._schedule_fulfillment(order.id, correlation_id)
@@ -169,9 +171,6 @@ class OrderService:
                 correlation_id=correlation_id,
             )
 
-            if settings.mqtt_enabled:
-                mqtt_service.publish_json(settings.mqtt_asn_topic, asn_payload)
-
             repo.commit()
             logger.info("Order fulfilled and ASN sent", extra={"order_id": order_id})
         except Exception:
@@ -195,6 +194,47 @@ class OrderService:
 
         self.complete_fulfillment(order_id, order.correlation_message_id)
         return {"status": "shipped", "order_id": order_id}
+
+    def send_audit_message(self, audit_id: int) -> dict:
+        db = SessionLocal()
+        repo = OrderRepository(db)
+        try:
+            entry = repo.get_audit_by_id(audit_id)
+            if entry is None:
+                raise ValueError("Audit entry not found")
+            if entry.direction != MessageDirection.OUTBOUND:
+                raise ValueError("Only outbound messages can be sent")
+            if entry.status == "SENT":
+                return {
+                    "status": "already_sent",
+                    "audit_id": audit_id,
+                    "message_id": entry.message_id,
+                }
+
+            topic_factory = OUTBOUND_TOPICS.get(entry.message_type)
+            if topic_factory is None:
+                raise ValueError(f"Unsupported outbound message type: {entry.message_type}")
+
+            payload = json.loads(entry.payload)
+            topic = topic_factory()
+            mqtt_service.publish_json(topic, payload)
+            repo.update_audit_status(entry, "SENT")
+            repo.commit()
+            logger.info(
+                "Outbound audit message sent manually",
+                extra={"audit_id": audit_id, "message_id": entry.message_id, "topic": topic},
+            )
+            return {
+                "status": "sent",
+                "audit_id": audit_id,
+                "message_id": entry.message_id,
+                "topic": topic,
+            }
+        except Exception:
+            repo.rollback()
+            raise
+        finally:
+            db.close()
 
 
 order_service = OrderService()

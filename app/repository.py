@@ -130,6 +130,14 @@ class OrderRepository:
         self.db.flush()
         return audit
 
+    def get_audit_by_id(self, audit_id: int) -> MessageAudit | None:
+        return self.db.query(MessageAudit).filter(MessageAudit.id == audit_id).first()
+
+    def update_audit_status(self, audit: MessageAudit, status: str) -> MessageAudit:
+        audit.status = status
+        self.db.flush()
+        return audit
+
     def list_audit_messages(self, limit: int = 100) -> list[MessageAudit]:
         return (
             self.db.query(MessageAudit)

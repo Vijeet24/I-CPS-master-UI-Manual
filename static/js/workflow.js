@@ -93,8 +93,9 @@ function renderAuditTable() {
   }
 
   tbody.innerHTML = workflowState.audit
-    .map(
-      (entry) => `
+    .map((entry) => {
+      const canSend = entry.direction === "OUTBOUND" && entry.status !== "SENT";
+      return `
       <tr>
         <td>${formatDateTime(entry.timestamp)}</td>
         <td><code>${escapeHtml(entry.message_type.replace("EDI_", ""))}</code></td>
@@ -102,9 +103,14 @@ function renderAuditTable() {
         <td>${escapeHtml(entry.status)}</td>
         <td class="actions">
           <button class="btn btn-secondary" data-action="view-message" data-id="${entry.id}">Payload</button>
+          ${
+            canSend
+              ? `<button class="btn btn-primary" data-action="send-message" data-id="${entry.id}">Send</button>`
+              : ""
+          }
         </td>
-      </tr>`
-    )
+      </tr>`;
+    })
     .join("");
 }
 
@@ -293,7 +299,21 @@ async function simulatePurchaseOrder() {
     sample.message_id = crypto.randomUUID();
     sample.payload.purchase_order.po_number = `PO-SIM-${Date.now()}`;
     await api.simulatePurchaseOrder(sample);
-    showToast("Simulated EDI 850 processed. Acknowledgement sent; fulfillment scheduled.");
+    showToast("Simulated EDI 850 processed. Acknowledgement generated; fulfillment scheduled.");
+    await refreshWorkflow();
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+async function sendAuditMessage(auditId) {
+  try {
+    const result = await api.sendAuditMessage(auditId);
+    if (result.status === "already_sent") {
+      showToast("Message was already sent.");
+    } else {
+      showToast(`Outbound message sent${result.topic ? ` to ${result.topic}` : ""}.`);
+    }
     await refreshWorkflow();
   } catch (error) {
     showToast(error.message, true);
@@ -337,6 +357,13 @@ export function bindWorkflowEvents() {
 
     if (button.dataset.action === "view-message") {
       openMessageDetail(Number(button.dataset.id));
+      return;
+    }
+
+    if (button.dataset.action === "send-message") {
+      sendAuditMessage(Number(button.dataset.id)).catch((error) =>
+        showToast(error.message, true)
+      );
     }
   });
 
