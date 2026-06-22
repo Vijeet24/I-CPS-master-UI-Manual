@@ -1,7 +1,6 @@
 import json
 import logging
-import threading
-import time
+import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -12,8 +11,16 @@ from app.edi.ack_generator import generate_edi_855
 from app.edi.asn_generator import generate_edi_856
 from app.edi.validators import EdiValidationError, validate_edi_850
 from app.mqtt.client import mqtt_service
-from app.order_models import MessageDirection, OrderStatus
+from app.order_models import MessageDirection, OrderStatus, VerificationResult
 from app.repository import OrderRepository
+from app.services.event_bus import event_bus
+from app.services.gtin_epc_resolver import (
+    GtinEpcResolverError,
+    create_po_lines,
+    gtin_epc_resolver,
+    record_system_event,
+)
+from app.services.rfid_service import rfid_service
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +62,7 @@ class OrderService:
                 payload=payload,
                 status="RECEIVED",
                 correlation_id=correlation_id,
+                topic=settings.mqtt_subscribe_topic if source == "MQTT" else None,
             )
 
             order = repo.create_order(
@@ -63,6 +71,14 @@ class OrderService:
                 seller_id=parsed.get("seller_id") or settings.seller_gln,
                 correlation_message_id=correlation_id,
                 raw_po_json=json.dumps(payload),
+            )
+            create_po_lines(db, order, parsed["line_items"])
+            record_system_event(
+                db,
+                "PO_RECEIVED",
+                order_id=order.id,
+                correlation_id=correlation_id,
+                payload={"po_number": order.po_number, "source": source},
             )
 
             ack_payload = generate_edi_855(
@@ -86,10 +102,20 @@ class OrderService:
                 payload=ack_payload,
                 status="GENERATED",
                 correlation_id=correlation_id,
+                topic=settings.mqtt_ack_topic,
+            )
+            record_system_event(
+                db,
+                "PO_ACKNOWLEDGED",
+                order_id=order.id,
+                correlation_id=correlation_id,
+                payload={"ack_message_id": ack_payload["message_id"]},
             )
 
+            self._prepare_order(db, repo, order)
+
             repo.commit()
-            self._schedule_fulfillment(order.id, correlation_id)
+            event_bus.publish("order_updated", {"order_id": order.id, "status": order.status.value})
             return {"status": "processed", "order_id": order.id, "message_id": correlation_id}
         except EdiValidationError as exc:
             repo.rollback()
@@ -106,34 +132,47 @@ class OrderService:
                     )
                     error_repo.commit()
             raise
+        except GtinEpcResolverError as exc:
+            repo.rollback()
+            logger.error("EPC allocation failed: %s", exc.message)
+            raise ValueError(exc.message) from exc
         except Exception:
             repo.rollback()
             raise
         finally:
             db.close()
 
-    def _schedule_fulfillment(self, order_id: int, correlation_id: str) -> None:
-        delay = 0
-        if settings.fulfillment_mode == "simulated":
-            delay = settings.fulfillment_delay_seconds
-        elif settings.fulfillment_mode == "scheduled":
-            delay = settings.fulfillment_delay_seconds
+    def _prepare_order(self, db: Session, repo: OrderRepository, order) -> None:
+        repo.update_order_status(order, OrderStatus.PICKING)
+        record_system_event(
+            db,
+            "ORDER_PICKING",
+            order_id=order.id,
+            correlation_id=order.correlation_message_id,
+        )
+        gtin_epc_resolver.allocate_for_order(db, order)
+        repo.update_order_status(order, OrderStatus.ALLOCATED)
+        record_system_event(
+            db,
+            "EPC_ALLOCATED",
+            order_id=order.id,
+            correlation_id=order.correlation_message_id,
+            payload={"epc_count": len(order.epc_allocations)},
+        )
 
-        if delay <= 0:
-            self.complete_fulfillment(order_id, correlation_id)
-            return
-
-        timer = threading.Timer(delay, self.complete_fulfillment, args=(order_id, correlation_id))
-        timer.daemon = True
-        timer.start()
-
-    def complete_fulfillment(self, order_id: int, correlation_id: str) -> None:
+    def generate_asn(self, order_id: int) -> dict:
         db = SessionLocal()
         repo = OrderRepository(db)
         try:
             order = repo.get_order_by_id(order_id)
-            if order is None or order.status == OrderStatus.SHIPPED:
-                return
+            if order is None:
+                raise ValueError("Order not found")
+            if order.status != OrderStatus.VERIFIED:
+                raise ValueError(
+                    f"ASN cannot be generated until RFID verification passes (status: {order.status.value})"
+                )
+            if order.shipment is not None:
+                return {"status": "already_sent", "order_id": order_id}
 
             po_message = json.loads(order.raw_po_json)
             parsed = {
@@ -141,8 +180,11 @@ class OrderService:
                 "po_number": order.po_number,
                 "buyer_id": order.buyer_id,
             }
+            allocations = gtin_epc_resolver.get_allocated_epcs(db, order_id)
+            epc_by_gtin: dict[str, list[str]] = {}
+            for allocation in order.epc_allocations:
+                epc_by_gtin.setdefault(allocation.gtin, []).append(allocation.epc)
 
-            repo.update_order_status(order, OrderStatus.READY_TO_SHIP)
             asn_payload = generate_edi_856(
                 po_message,
                 parsed,
@@ -151,6 +193,7 @@ class OrderService:
                 order.buyer_id,
                 po_message.get("sender", {}).get("name") or settings.buyer_name,
                 settings.default_carrier,
+                epc_by_gtin=epc_by_gtin,
             )
             shipment_data = asn_payload["payload"]["shipment"]
             repo.create_shipment(
@@ -160,40 +203,57 @@ class OrderService:
                 carrier=shipment_data["carrier"],
                 ship_date=datetime.fromisoformat(shipment_data["ship_date"]),
                 raw_856_json=json.dumps(asn_payload),
+                asn_number=shipment_data.get("asn_number"),
+                delivery_date=(
+                    datetime.fromisoformat(shipment_data["delivery_date"])
+                    if shipment_data.get("delivery_date")
+                    else None
+                ),
             )
-            repo.update_order_status(order, OrderStatus.SHIPPED)
+            gtin_epc_resolver.mark_shipped(db, order_id)
+            repo.update_order_status(order, OrderStatus.ASN_SENT)
             repo.record_audit(
                 message_id=asn_payload["message_id"],
                 message_type="EDI_856_ADVANCE_SHIP_NOTICE",
                 direction=MessageDirection.OUTBOUND,
                 payload=asn_payload,
                 status="GENERATED",
-                correlation_id=correlation_id,
+                correlation_id=order.correlation_message_id,
+                topic=settings.mqtt_asn_topic,
             )
-
+            record_system_event(
+                db,
+                "ASN_GENERATED",
+                order_id=order.id,
+                correlation_id=order.correlation_message_id,
+                payload={"asn_number": shipment_data.get("asn_number")},
+            )
             repo.commit()
-            logger.info("Order fulfilled and ASN sent", extra={"order_id": order_id})
+            event_bus.publish("asn_generated", {"order_id": order_id})
+            return {"status": "generated", "order_id": order_id, "message_id": asn_payload["message_id"]}
         except Exception:
             repo.rollback()
-            logger.exception("Fulfillment failed for order %s", order_id)
+            raise
         finally:
             db.close()
 
-    def force_ship(self, order_id: int) -> dict:
+    def complete_rfid_and_asn(self, order_id: int) -> dict:
         db = SessionLocal()
-        repo = OrderRepository(db)
         try:
-            order = repo.get_order_by_id(order_id)
-            if order is None:
-                raise ValueError("Order not found")
-            if order.status == OrderStatus.SHIPPED:
-                return {"status": "already_shipped", "order_id": order_id}
+            rfid_service.start_scan(db, order_id)
+            scan = rfid_service.verify(db, order_id)
+            repo = OrderRepository(db)
             repo.commit()
         finally:
             db.close()
 
-        self.complete_fulfillment(order_id, order.correlation_message_id)
-        return {"status": "shipped", "order_id": order_id}
+        if scan.result != VerificationResult.PASS:
+            return {"status": "verification_failed", "order_id": order_id}
+
+        return self.generate_asn(order_id)
+
+    def force_ship(self, order_id: int) -> dict:
+        return self.complete_rfid_and_asn(order_id)
 
     def send_audit_message(self, audit_id: int) -> dict:
         db = SessionLocal()
@@ -216,12 +276,13 @@ class OrderService:
                 raise ValueError(f"Unsupported outbound message type: {entry.message_type}")
 
             payload = json.loads(entry.payload)
-            topic = topic_factory()
+            topic = entry.topic or topic_factory()
             mqtt_service.publish_json(topic, payload)
             repo.update_audit_status(entry, "SENT")
             repo.commit()
+            event_bus.publish("mqtt_message_sent", {"audit_id": audit_id, "topic": topic})
             logger.info(
-                "Outbound audit message sent manually",
+                "Outbound audit message sent",
                 extra={"audit_id": audit_id, "message_id": entry.message_id, "topic": topic},
             )
             return {

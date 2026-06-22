@@ -1,7 +1,7 @@
 async function apiRequest(path, options = {}) {
   const response = await fetch(path, {
     headers: {
-      "Content-Type": "application/json",
+      ...(options.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
       ...(options.headers || {}),
     },
     ...options,
@@ -11,12 +11,23 @@ async function apiRequest(path, options = {}) {
     return null;
   }
 
+  const contentType = response.headers.get("content-type") || "";
+  if (contentType.includes("text/csv")) {
+    if (!response.ok) {
+      throw new Error(response.statusText);
+    }
+    return response.text();
+  }
+
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const detail = data.detail;
-    const message = Array.isArray(detail)
-      ? detail.map((item) => item.msg || JSON.stringify(item)).join(", ")
-      : detail || response.statusText;
+    const message =
+      typeof detail === "object" && detail?.message
+        ? detail.message
+        : Array.isArray(detail)
+          ? detail.map((item) => item.msg || JSON.stringify(item)).join(", ")
+          : detail || response.statusText;
     throw new Error(message);
   }
 
@@ -31,6 +42,21 @@ export const api = {
   updateProduct: (id, payload) =>
     apiRequest(`/api/products/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
   deleteProduct: (id) => apiRequest(`/api/products/${id}`, { method: "DELETE" }),
+  exportProducts: () => apiRequest("/api/products/export"),
+  previewProductImport: (file) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    return apiRequest("/api/products/import/preview", { method: "POST", body: formData });
+  },
+  importProducts: (file) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    return apiRequest("/api/products/import", { method: "POST", body: formData });
+  },
+  getEpcInventory: (gtin) => {
+    const query = gtin ? `?gtin=${encodeURIComponent(gtin)}` : "";
+    return apiRequest(`/api/products/epc-inventory${query}`);
+  },
 
   getBrands: () => apiRequest("/api/brands"),
   createBrand: (payload) =>
@@ -59,12 +85,34 @@ export const api = {
   getOrders: () => apiRequest("/api/orders"),
   getOrder: (id) => apiRequest(`/api/orders/${id}`),
   getOrderAudit: (id) => apiRequest(`/api/orders/${id}/audit`),
-  getMessageAudit: (limit = 100) => apiRequest(`/api/orders/audit?limit=${limit}`),
+  getMessageAudit: (limit = 100, search = "") => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (search) {
+      params.set("search", search);
+    }
+    return apiRequest(`/api/mqtt/audit?${params.toString()}`);
+  },
   getWorkflowStats: () => apiRequest("/api/orders/stats"),
+  getDashboardMetrics: () => apiRequest("/api/dashboard/metrics"),
+  getAsnTracking: () => apiRequest("/api/dashboard/asn-tracking"),
   getMqttStatus: () => apiRequest("/api/orders/mqtt-status"),
   getSamplePurchaseOrder: () => apiRequest("/api/orders/sample/purchase-order"),
   simulatePurchaseOrder: (payload) =>
     apiRequest("/api/orders/simulate", { method: "POST", body: JSON.stringify({ payload }) }),
   forceShipOrder: (id) => apiRequest(`/api/orders/${id}/ship`, { method: "POST" }),
   sendAuditMessage: (id) => apiRequest(`/api/orders/audit/${id}/send`, { method: "POST" }),
+
+  startRfidScan: (orderId, rescan = false) =>
+    apiRequest("/api/rfid/start-scan", {
+      method: "POST",
+      body: JSON.stringify({ order_id: orderId, rescan }),
+    }),
+  verifyRfidScan: (orderId, scanSessionId) =>
+    apiRequest("/api/rfid/verify", {
+      method: "POST",
+      body: JSON.stringify({ order_id: orderId, scan_session_id: scanSessionId || null }),
+    }),
+  getRfidResults: (orderId) => apiRequest(`/api/rfid/results/${orderId}`),
+  generateAsn: (orderId) =>
+    apiRequest("/api/asn/generate", { method: "POST", body: JSON.stringify({ order_id: orderId }) }),
 };

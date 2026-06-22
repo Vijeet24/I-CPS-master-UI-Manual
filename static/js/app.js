@@ -6,6 +6,7 @@ import {
   closeModal,
   confirmAction,
   escapeHtml,
+  formatDateTime,
   formatPrice,
   openModal,
   showToast,
@@ -22,9 +23,11 @@ import {
 
 const state = {
   products: [],
+  filteredProducts: [],
   brands: [],
   categories: [],
   subcategories: [],
+  pendingImportFile: null,
   editingProductId: null,
   editingBrandId: null,
   editingCategoryId: null,
@@ -119,15 +122,60 @@ function populateSubcategorySelect(select, categoryId, selectedId = "") {
   select.disabled = !categoryId;
 }
 
-function renderProductsTable() {
-  const tbody = $("#products-table tbody");
-  if (!state.products.length) {
-    tbody.innerHTML =
-      '<tr><td colspan="8" class="empty-state">No products yet. Click "New Product" to add one.</td></tr>';
+function applyProductFilters() {
+  const search = ($("#product-search")?.value || "").trim().toLowerCase();
+  const categoryFilter = $("#product-category-filter")?.value || "";
+  const brandFilter = $("#product-brand-filter")?.value || "";
+
+  state.filteredProducts = state.products.filter((product) => {
+    const matchesSearch =
+      !search ||
+      product.product_name.toLowerCase().includes(search) ||
+      product.gtin_14.includes(search) ||
+      (product.brand_name || "").toLowerCase().includes(search);
+    const matchesCategory = !categoryFilter || String(product.category_id) === String(categoryFilter);
+    const matchesBrand = !brandFilter || String(product.brand_id) === String(brandFilter);
+    return matchesSearch && matchesCategory && matchesBrand;
+  });
+}
+
+function populateProductFilters() {
+  const categorySelect = $("#product-category-filter");
+  const brandSelect = $("#product-brand-filter");
+  if (!categorySelect || !brandSelect) {
     return;
   }
 
-  tbody.innerHTML = state.products
+  const currentCategory = categorySelect.value;
+  const currentBrand = brandSelect.value;
+  categorySelect.innerHTML =
+    '<option value="">All categories</option>' +
+    state.categories
+      .map(
+        (category) =>
+          `<option value="${category.id}" ${String(category.id) === currentCategory ? "selected" : ""}>${escapeHtml(category.name)}</option>`
+      )
+      .join("");
+  brandSelect.innerHTML =
+    '<option value="">All brands</option>' +
+    state.brands
+      .map(
+        (brand) =>
+          `<option value="${brand.id}" ${String(brand.id) === currentBrand ? "selected" : ""}>${escapeHtml(brand.brand_name)}</option>`
+      )
+      .join("");
+}
+
+function renderProductsTable() {
+  applyProductFilters();
+  const tbody = $("#products-table tbody");
+  if (!state.filteredProducts.length) {
+    tbody.innerHTML =
+      '<tr><td colspan="8" class="empty-state">No products match the current filters.</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = state.filteredProducts
     .map(
       (product) => `
       <tr>
@@ -229,6 +277,7 @@ async function refreshAll() {
   state.brands = brands;
   state.categories = categories;
   state.subcategories = subcategories;
+  populateProductFilters();
   renderProductsTable();
   renderBrandsTable();
   renderCategoriesTable();
@@ -492,6 +541,101 @@ function bindEvents() {
   $("#new-category-btn").addEventListener("click", () => openCategoryModal());
   $("#new-subcategory-btn").addEventListener("click", () => openSubcategoryModal());
   $("#refresh-btn").addEventListener("click", () => refreshAll().catch((error) => showToast(error.message, true)));
+
+  $("#product-search")?.addEventListener("input", renderProductsTable);
+  $("#product-category-filter")?.addEventListener("change", renderProductsTable);
+  $("#product-brand-filter")?.addEventListener("change", renderProductsTable);
+
+  $("#export-products-btn")?.addEventListener("click", async () => {
+    try {
+      const csv = await api.exportProducts();
+      const blob = new Blob([csv], { type: "text/csv" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "products.csv";
+      link.click();
+      URL.revokeObjectURL(url);
+      showToast("Product catalog exported.");
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  });
+
+  $("#import-products-file")?.addEventListener("change", async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+    try {
+      const preview = await api.previewProductImport(file);
+      state.pendingImportFile = file;
+      $("#import-preview-body").innerHTML = `
+        <p><strong>Imported:</strong> ${preview.imported_count} &nbsp; <strong>Failed:</strong> ${preview.failed_count}</p>
+        <div class="table-wrap">
+          <table class="nested-table">
+            <thead><tr><th>Row</th><th>GTIN</th><th>Product</th><th>Status</th><th>Errors</th></tr></thead>
+            <tbody>
+              ${preview.rows
+                .map(
+                  (row) => `
+                <tr>
+                  <td>${row.row_number}</td>
+                  <td><code>${escapeHtml(row.data.gtin_14 || "—")}</code></td>
+                  <td>${escapeHtml(row.data.product_name || "—")}</td>
+                  <td>${row.valid ? "Valid" : "Invalid"}</td>
+                  <td>${escapeHtml((row.errors || []).join(", ") || "—")}</td>
+                </tr>`
+                )
+                .join("")}
+            </tbody>
+          </table>
+        </div>`;
+      $("#confirm-import-btn").disabled = preview.failed_count > 0;
+      openModal("import-preview-modal");
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  });
+
+  $("#confirm-import-btn")?.addEventListener("click", async () => {
+    if (!state.pendingImportFile) {
+      return;
+    }
+    try {
+      const result = await api.importProducts(state.pendingImportFile);
+      showToast(`Imported ${result.imported_count} products.`);
+      state.pendingImportFile = null;
+      closeModal("import-preview-modal");
+      await refreshAll();
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  });
+
+  $("#view-epc-inventory-btn")?.addEventListener("click", async () => {
+    try {
+      const rows = await api.getEpcInventory();
+      const tbody = $("#epc-inventory-table tbody");
+      tbody.innerHTML = rows.length
+        ? rows
+            .map(
+              (row) => `
+            <tr>
+              <td><code>${escapeHtml(row.epc)}</code></td>
+              <td><code>${escapeHtml(row.gtin)}</code></td>
+              <td>${escapeHtml(row.status)}</td>
+              <td>${formatDateTime(row.last_updated)}</td>
+            </tr>`
+            )
+            .join("")
+        : '<tr><td colspan="4" class="empty-state">No EPC inventory records found.</td></tr>';
+      openModal("epc-inventory-modal");
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  });
 
   $("#product-form").addEventListener("submit", saveProduct);
   $("#brand-form").addEventListener("submit", saveBrand);

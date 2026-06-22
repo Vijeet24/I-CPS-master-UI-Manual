@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from app.config import settings
 from app.database import SessionLocal, init_db
 from app.mqtt.client import mqtt_service
-from app.routers import brands, categories, orders, products
+from app.routers import asn, brands, categories, dashboard, orders, products, purchase_orders, rfid, ws
 from app.seed import seed_reference_data
 from app.services.order_service import order_service
 
@@ -44,12 +44,17 @@ async def lifespan(_: FastAPI):
     mqtt_service.stop()
 
 
-app = FastAPI(title="ICPS Master UI", version="1.1.0", lifespan=lifespan)
+app = FastAPI(title="ICPS Master UI", version="2.0.0", lifespan=lifespan)
 
 app.include_router(brands.router)
 app.include_router(categories.router)
 app.include_router(products.router)
 app.include_router(orders.router)
+app.include_router(dashboard.router)
+app.include_router(rfid.router)
+app.include_router(asn.router)
+app.include_router(purchase_orders.router)
+app.include_router(ws.router)
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 

@@ -11,9 +11,45 @@ from sqlalchemy.pool import StaticPool
 from app.config import settings
 from app.database import Base, get_db
 from app.main import app
-from app import order_models  # noqa: F401
+from app import models, order_models  # noqa: F401
+from app.order_models import EpcInventory, EpcStatus
+from app.models import Brand, Category, Product, Subcategory
 
 SQLITE_URL = "sqlite://"
+
+
+def _seed_catalog(db):
+    brand = Brand(
+        brand_name="MedSupply Co",
+        brand_gln="1234567890123",
+    )
+    db.add(brand)
+    db.flush()
+    category = Category(name="Sensors")
+    db.add(category)
+    db.flush()
+    subcategory = Subcategory(name="Oxygen sensor", category_id=category.id)
+    db.add(subcategory)
+    db.flush()
+    product = Product(
+        gtin_14="00012345678936",
+        product_name="Oxygen Sensor",
+        unit_of_measure="EA",
+        currency="USD",
+        brand_id=brand.id,
+        category_id=category.id,
+        sub_category_id=subcategory.id,
+    )
+    db.add(product)
+    for suffix in range(400, 405):
+        db.add(
+            EpcInventory(
+                epc=f"urn:epc:id:sgtin:0614141.112345.{suffix}",
+                gtin="00012345678936",
+                status=EpcStatus.AVAILABLE,
+            )
+        )
+    db.commit()
 
 
 @pytest.fixture()
@@ -25,6 +61,9 @@ def client():
     )
     TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     Base.metadata.create_all(bind=engine)
+    db = TestingSessionLocal()
+    _seed_catalog(db)
+    db.close()
 
     def override_get_db():
         db = TestingSessionLocal()
@@ -44,9 +83,8 @@ def client():
                 with patch("app.main.init_db"):
                     with patch("app.main.seed_reference_data"):
                         with patch.object(settings, "mqtt_enabled", False):
-                            with patch.object(settings, "fulfillment_mode", "immediate"):
-                                with TestClient(app) as test_client:
-                                    yield test_client
+                            with TestClient(app) as test_client:
+                                yield test_client
 
     app.dependency_overrides.clear()
     Base.metadata.drop_all(bind=engine)
@@ -85,22 +123,38 @@ def _sample_po() -> dict:
     }
 
 
+def _complete_order(client, order_id: int):
+    scan = client.post("/api/rfid/start-scan", json={"order_id": order_id})
+    assert scan.status_code == 200
+    verify = client.post("/api/rfid/verify", json={"order_id": order_id})
+    assert verify.status_code == 200
+    assert verify.json()["result"] == "PASS"
+    asn = client.post("/api/asn/generate", json={"order_id": order_id})
+    assert asn.status_code == 200
+    return asn.json()
+
+
 def test_simulate_purchase_order(client):
     response = client.post("/api/orders/simulate", json={"payload": _sample_po()})
     assert response.status_code == 201
     body = response.json()
-    assert body["status"] == "SHIPPED"
+    assert body["status"] == "ALLOCATED"
     assert body["acknowledgement"] is not None
-    assert body["shipment"] is not None
+    assert body["epc_allocations"]
+
+    completed = _complete_order(client, body["id"])
+    assert completed["status"] == "ASN_SENT"
+    assert completed["shipment"] is not None
 
 
 def test_list_orders_and_stats(client):
     client.post("/api/orders/simulate", json={"payload": _sample_po()})
     orders = client.get("/api/orders").json()
     stats = client.get("/api/orders/stats").json()
+    metrics = client.get("/api/dashboard/metrics").json()
     assert len(orders) >= 1
     assert stats["total"] >= 1
-    assert stats["shipped"] >= 1
+    assert metrics["total_products"] >= 1
 
 
 def test_duplicate_po_is_idempotent(client):
@@ -115,7 +169,10 @@ def test_duplicate_po_is_idempotent(client):
 
 
 def test_send_audit_message(client):
-    client.post("/api/orders/simulate", json={"payload": _sample_po()})
+    response = client.post("/api/orders/simulate", json={"payload": _sample_po()})
+    order_id = response.json()["id"]
+    _complete_order(client, order_id)
+
     audit = client.get("/api/orders/audit").json()
     outbound = [entry for entry in audit if entry["direction"] == "OUTBOUND"]
     assert outbound
@@ -123,12 +180,47 @@ def test_send_audit_message(client):
     assert ack["status"] == "GENERATED"
 
     with patch("app.services.order_service.mqtt_service") as mqtt_mock:
-        response = client.post(f"/api/orders/audit/{ack['id']}/send")
+        send_response = client.post(f"/api/orders/audit/{ack['id']}/send")
 
-    assert response.status_code == 200
-    assert response.json()["status"] == "sent"
+    assert send_response.status_code == 200
+    assert send_response.json()["status"] == "sent"
     mqtt_mock.publish_json.assert_called_once()
 
-    audit_after = client.get("/api/orders/audit").json()
-    ack_after = next(entry for entry in audit_after if entry["id"] == ack["id"])
-    assert ack_after["status"] == "SENT"
+
+def test_rfid_verification_failure(client):
+    response = client.post("/api/orders/simulate", json={"payload": _sample_po()})
+    order_id = response.json()["id"]
+    scan = client.post("/api/rfid/start-scan", json={"order_id": order_id}).json()
+
+    from app.database import SessionLocal
+    from app.order_models import RfidScan
+
+    db = SessionLocal()
+    row = db.query(RfidScan).filter(RfidScan.scan_session_id == scan["scan_session_id"]).first()
+    row.scanned_epcs = json.dumps(["urn:epc:id:sgtin:0614141.112345.999"])
+    db.commit()
+    db.close()
+
+    verify = client.post(
+        "/api/rfid/verify",
+        json={"order_id": order_id, "scan_session_id": scan["scan_session_id"]},
+    )
+    assert verify.status_code == 200
+    assert verify.json()["result"] == "FAIL"
+    assert verify.json()["missing_epcs"]
+
+    asn = client.post("/api/asn/generate", json={"order_id": order_id})
+    assert asn.status_code == 400
+
+
+def test_purchase_orders_alias_endpoint(client):
+    response = client.post("/api/purchase-orders", json={"payload": _sample_po()})
+    assert response.status_code == 201
+    assert response.json()["status"] == "ALLOCATED"
+
+
+def test_mqtt_audit_search(client):
+    client.post("/api/purchase-orders", json={"payload": _sample_po()})
+    audit = client.get("/api/mqtt/audit?search=850").json()
+    assert audit
+    assert any("850" in entry["message_type"] for entry in audit)

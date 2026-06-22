@@ -11,23 +11,28 @@ def generate_edi_856(
     buyer_gln: str,
     buyer_name: str,
     carrier: str,
+    epc_by_gtin: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     payload = po_message.get("payload", {})
     line_items = payload.get("line_items", [])
     shipment_id = f"SHP-{uuid.uuid4().hex[:12].upper()}"
+    asn_number = f"ASN-{uuid.uuid4().hex[:10].upper()}"
     tracking_number = f"TRK{uuid.uuid4().hex[:10].upper()}"
     ship_date = datetime.now(timezone.utc).isoformat()
+    delivery_date = datetime.now(timezone.utc).isoformat()
 
     shipped_lines = []
     for item in line_items:
-        shipped_lines.append(
-            {
-                "po_line_number": item.get("line_number"),
-                "item_identification": item.get("item_identification", {}),
-                "quantity_shipped": item.get("quantity_ordered"),
-                "unit_of_measure": item.get("unit_of_measure"),
-            }
-        )
+        gtin = item.get("item_identification", {}).get("gtin_14")
+        line_payload = {
+            "po_line_number": item.get("line_number"),
+            "item_identification": item.get("item_identification", {}),
+            "quantity_shipped": item.get("quantity_ordered"),
+            "unit_of_measure": item.get("unit_of_measure"),
+        }
+        if epc_by_gtin and gtin in epc_by_gtin:
+            line_payload["epcs"] = epc_by_gtin[gtin]
+        shipped_lines.append(line_payload)
 
     return {
         "message_id": f"MSG-856-{uuid.uuid4()}",
@@ -44,10 +49,12 @@ def generate_edi_856(
                 "version": "1.0",
             },
             "shipment": {
+                "asn_number": asn_number,
                 "shipment_id": shipment_id,
                 "carrier": carrier,
                 "tracking_number": tracking_number,
                 "ship_date": ship_date,
+                "delivery_date": delivery_date,
                 "po_number": parsed["po_number"],
                 "order_reference": parsed["message_id"],
             },

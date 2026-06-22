@@ -1,9 +1,13 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi.responses import Response
+from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
 
 from app.database import get_db
 from app.models import Brand, Category, Product, Subcategory
+from app.order_models import EpcInventory, EpcStatus
 from app.schemas import ProductCreate, ProductResponse, ProductUpdate
+from app.services.product_import import export_products_csv, import_products, validate_import_rows
 
 router = APIRouter(prefix="/api/products", tags=["products"])
 
@@ -84,6 +88,92 @@ def list_products(db: Session = Depends(get_db)):
         .all()
     )
     return [_serialize_product(product) for product in products]
+
+
+class ImportPreviewResponse(BaseModel):
+    imported_count: int
+    failed_count: int
+    rows: list[dict]
+
+
+@router.post("/import/preview", response_model=ImportPreviewResponse)
+async def preview_product_import(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    content = (await file.read()).decode("utf-8-sig")
+    preview = validate_import_rows(db, content)
+    return ImportPreviewResponse(
+        imported_count=preview.imported_count,
+        failed_count=preview.failed_count,
+        rows=[
+            {"row_number": row.row_number, "data": row.data, "valid": row.valid, "errors": row.errors}
+            for row in preview.rows
+        ],
+    )
+
+
+@router.post("/import", response_model=ImportPreviewResponse)
+async def import_product_csv(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    content = (await file.read()).decode("utf-8-sig")
+    preview = import_products(db, content)
+    if preview.failed_count:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "message": "Import rejected due to validation errors",
+                "failed_count": preview.failed_count,
+                "rows": [
+                    {"row_number": row.row_number, "errors": row.errors}
+                    for row in preview.rows
+                    if not row.valid
+                ],
+            },
+        )
+    return ImportPreviewResponse(
+        imported_count=preview.imported_count,
+        failed_count=preview.failed_count,
+        rows=[],
+    )
+
+
+@router.get("/export")
+def export_products(db: Session = Depends(get_db)):
+    csv_content = export_products_csv(db)
+    return Response(
+        content=csv_content,
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="products.csv"'},
+    )
+
+
+class EpcInventoryResponse(BaseModel):
+    id: int
+    epc: str
+    gtin: str
+    status: str
+    last_updated: str
+
+
+@router.get("/epc-inventory", response_model=list[EpcInventoryResponse])
+def list_epc_inventory(
+    gtin: str | None = None,
+    status: str | None = None,
+    db: Session = Depends(get_db),
+):
+    query = db.query(EpcInventory)
+    if gtin:
+        query = query.filter(EpcInventory.gtin == gtin)
+    if status:
+        query = query.filter(EpcInventory.status == EpcStatus(status))
+    rows = query.order_by(EpcInventory.gtin, EpcInventory.epc).all()
+    return [
+        EpcInventoryResponse(
+            id=row.id,
+            epc=row.epc,
+            gtin=row.gtin,
+            status=row.status.value,
+            last_updated=row.last_updated.isoformat(),
+        )
+        for row in rows
+    ]
 
 
 @router.get("/{product_id}", response_model=ProductResponse)
@@ -190,3 +280,4 @@ def delete_product(product_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
     db.delete(product)
     db.commit()
+

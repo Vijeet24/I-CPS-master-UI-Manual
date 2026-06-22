@@ -1,9 +1,20 @@
 import json
+import logging
 from datetime import datetime
 
 from sqlalchemy.orm import Session, joinedload
 
-from app.order_models import Acknowledgement, MessageAudit, MessageDirection, Order, OrderStatus, Shipment
+from app.models import Product
+from app.order_models import (
+    Acknowledgement,
+    EpcInventory,
+    EpcStatus,
+    MessageAudit,
+    MessageDirection,
+    Order,
+    OrderStatus,
+    Shipment,
+)
 
 
 class OrderRepository:
@@ -23,6 +34,9 @@ class OrderRepository:
             .options(
                 joinedload(Order.acknowledgement),
                 joinedload(Order.shipment),
+                joinedload(Order.po_lines),
+                joinedload(Order.epc_allocations),
+                joinedload(Order.rfid_scans),
             )
             .filter(Order.id == order_id)
             .first()
@@ -34,6 +48,8 @@ class OrderRepository:
             .options(
                 joinedload(Order.acknowledgement),
                 joinedload(Order.shipment),
+                joinedload(Order.po_lines),
+                joinedload(Order.epc_allocations),
             )
             .order_by(Order.received_timestamp.desc())
             .all()
@@ -84,13 +100,17 @@ class OrderRepository:
         carrier: str,
         ship_date: datetime,
         raw_856_json: str,
+        asn_number: str | None = None,
+        delivery_date: datetime | None = None,
     ) -> Shipment:
         shipment = Shipment(
             order_id=order_id,
+            asn_number=asn_number or shipment_id,
             shipment_id=shipment_id,
             tracking_number=tracking_number,
             carrier=carrier,
             ship_date=ship_date,
+            delivery_date=delivery_date,
             raw_856_json=raw_856_json,
         )
         self.db.add(shipment)
@@ -116,6 +136,7 @@ class OrderRepository:
         payload: dict | str,
         status: str = "PROCESSED",
         correlation_id: str | None = None,
+        topic: str | None = None,
     ) -> MessageAudit:
         payload_text = payload if isinstance(payload, str) else json.dumps(payload)
         audit = MessageAudit(
@@ -125,6 +146,7 @@ class OrderRepository:
             payload=payload_text,
             status=status,
             correlation_id=correlation_id,
+            topic=topic,
         )
         self.db.add(audit)
         self.db.flush()
@@ -138,13 +160,24 @@ class OrderRepository:
         self.db.flush()
         return audit
 
-    def list_audit_messages(self, limit: int = 100) -> list[MessageAudit]:
-        return (
-            self.db.query(MessageAudit)
-            .order_by(MessageAudit.timestamp.desc())
-            .limit(limit)
-            .all()
-        )
+    def list_audit_messages(
+        self,
+        limit: int = 100,
+        search: str | None = None,
+        direction: MessageDirection | None = None,
+    ) -> list[MessageAudit]:
+        query = self.db.query(MessageAudit)
+        if direction:
+            query = query.filter(MessageAudit.direction == direction)
+        if search:
+            pattern = f"%{search}%"
+            query = query.filter(
+                (MessageAudit.message_type.ilike(pattern))
+                | (MessageAudit.correlation_id.ilike(pattern))
+                | (MessageAudit.message_id.ilike(pattern))
+                | (MessageAudit.topic.ilike(pattern))
+            )
+        return query.order_by(MessageAudit.timestamp.desc()).limit(limit).all()
 
     def list_audit_for_order(self, correlation_id: str) -> list[MessageAudit]:
         return (
@@ -160,14 +193,63 @@ class OrderRepository:
             "total": len(orders),
             "received": 0,
             "acknowledged": 0,
-            "ready_to_ship": 0,
-            "shipped": 0,
+            "picking": 0,
+            "allocated": 0,
+            "verified": 0,
+            "asn_sent": 0,
+            "verification_failures": 0,
         }
         for order in orders:
             key = order.status.value.lower()
             if key in stats:
                 stats[key] += 1
         return stats
+
+    def get_dashboard_metrics(self) -> dict:
+        stats = self.get_stats()
+        total_products = self.db.query(Product).count()
+        total_epcs_available = (
+            self.db.query(EpcInventory)
+            .filter(EpcInventory.status == EpcStatus.AVAILABLE)
+            .count()
+        )
+        stats["verification_failures"] = self.count_verification_failures()
+        return {
+            **stats,
+            "purchase_orders_received": stats["received"] + stats["acknowledged"] + stats["picking"] + stats["allocated"] + stats["verified"] + stats["asn_sent"],
+            "po_acknowledgements_sent": self.db.query(Acknowledgement).count(),
+            "orders_in_preparation": stats["picking"] + stats["allocated"],
+            "rfid_verification_failures": stats["verification_failures"],
+            "asn_sent": stats["asn_sent"],
+            "total_products": total_products,
+            "total_epcs_available": total_epcs_available,
+            "pipeline": {
+                "RECEIVED": stats["received"],
+                "ACKNOWLEDGED": stats["acknowledged"],
+                "PICKING": stats["picking"],
+                "ALLOCATED": stats["allocated"],
+                "VERIFIED": stats["verified"],
+                "ASN_SENT": stats["asn_sent"],
+            },
+        }
+
+    def count_verification_failures(self) -> int:
+        from app.order_models import RfidScan, VerificationResult
+
+        return (
+            self.db.query(RfidScan)
+            .filter(RfidScan.result == VerificationResult.FAIL)
+            .count()
+        )
+
+    def list_asn_tracking(self, limit: int = 50) -> list[Shipment]:
+        return (
+            self.db.query(Shipment)
+            .options(joinedload(Shipment.order).joinedload(Order.epc_allocations))
+            .order_by(Shipment.ship_date.desc())
+            .limit(limit)
+            .all()
+        )
 
     def commit(self) -> None:
         self.db.commit()
