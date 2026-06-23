@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ICPS — Seller Operations Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/css/dashboard.css" />
+  </head>
+  <body>
+    <div class="dash-bg">
+      <div class="dash-grid-overlay" aria-hidden="true"></div>
+      <div class="dash-glow dash-glow-a" aria-hidden="true"></div>
+      <div class="dash-glow dash-glow-b" aria-hidden="true"></div>
+    </div>
+
+    <header class="dash-topbar">
+      <div class="dash-topbar-left">
+        <a href="/" class="dash-back-link" title="Back to Admin UI">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M19 12H5M12 19l-7-7 7-7" />
+          </svg>
+          Admin UI
+        </a>
+        <div class="dash-brand">
+          <span class="dash-brand-icon">◈</span>
+          <div>
+            <strong>Seller Operations</strong>
+            <span>Real-time purchase order monitoring</span>
+          </div>
+        </div>
+      </div>
+      <div class="dash-topbar-center">
+        <div class="mqtt-pill" id="dash-mqtt-pill">
+          <span class="mqtt-dot" id="dash-mqtt-dot"></span>
+          <span id="dash-mqtt-text">Connecting…</span>
+        </div>
+        <div class="live-clock" id="dash-clock"></div>
+      </div>
+      <div class="dash-topbar-right">
+        <label class="dash-toggle">
+          <input type="checkbox" id="dash-auto-refresh" checked />
+          <span>Live sync</span>
+        </label>
+        <button class="dash-btn dash-btn-ghost" id="dash-refresh-btn">Refresh</button>
+      </div>
+    </header>
+
+    <main class="dash-main">
+      <section class="dash-kpi-row" id="dash-kpi-row"></section>
+
+      <section class="dash-hero">
+        <div class="dash-hero-card glass-card">
+          <div class="hero-card-head">
+            <div>
+              <p class="eyebrow">Current Purchase Order</p>
+              <h1 id="hero-po-number">—</h1>
+              <p class="hero-sub" id="hero-po-meta">Select or receive a purchase order to begin monitoring.</p>
+            </div>
+            <div class="hero-actions">
+              <select id="order-selector" class="dash-select" aria-label="Select purchase order"></select>
+              <button class="dash-btn dash-btn-accent" id="dash-simulate-btn">Simulate PO</button>
+            </div>
+          </div>
+          <div class="hero-status-row">
+            <div class="hero-status-chip" id="hero-status-chip">—</div>
+            <div class="hero-meta-grid">
+              <div><span>Buyer</span><code id="hero-buyer">—</code></div>
+              <div><span>Correlation ID</span><code id="hero-correlation">—</code></div>
+              <div><span>Received</span><span id="hero-received">—</span></div>
+              <div><span>ASN Status</span><span id="hero-asn">—</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="dash-pipeline-card glass-card">
+          <div class="card-head">
+            <h2>Processing Pipeline</h2>
+            <span class="card-badge" id="pipeline-progress">0 / 6</span>
+          </div>
+          <div class="pipeline-track" id="pipeline-track"></div>
+        </div>
+      </section>
+
+      <section class="dash-grid-3">
+        <article class="glass-card dash-panel">
+          <div class="card-head">
+            <h2>Line Items & EPCs</h2>
+          </div>
+          <div id="line-items-panel" class="panel-body">
+            <p class="empty-hint">No line items to display.</p>
+          </div>
+        </article>
+
+        <article class="glass-card dash-panel rfid-panel-card">
+          <div class="card-head">
+            <h2>RFID Verification</h2>
+            <span class="verification-pill" id="rfid-result-pill">Pending</span>
+          </div>
+          <div id="rfid-panel" class="panel-body">
+            <p class="empty-hint">RFID data will appear when an order is allocated.</p>
+          </div>
+          <div class="rfid-actions" id="rfid-actions"></div>
+        </article>
+
+        <article class="glass-card dash-panel">
+          <div class="card-head">
+            <h2>MQTT Event Stream</h2>
+          </div>
+          <div class="panel-body mqtt-feed" id="mqtt-feed"></div>
+        </article>
+      </section>
+
+      <section class="glass-card dash-panel asn-section">
+        <div class="card-head">
+          <h2>ASN Tracking</h2>
+        </div>
+        <div class="panel-body">
+          <div class="table-scroll">
+            <table class="dash-table" id="asn-table">
+              <thead>
+                <tr>
+                  <th>ASN Number</th>
+                  <th>PO Number</th>
+                  <th>Carrier</th>
+                  <th>Sent</th>
+                  <th>EPCs</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div class="toast dash-toast" id="toast" role="status" aria-live="polite"></div>
+    <script type="module" src="/static/js/dashboard.js"></script>
+  </body>
+</html>

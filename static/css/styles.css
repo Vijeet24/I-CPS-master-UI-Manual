@@ -26,11 +26,55 @@ body {
   color: var(--text);
 }
 
-header {
+header,
+.site-header {
   background: linear-gradient(135deg, #1e3a8a, #2563eb);
   color: white;
   padding: 1.25rem 2rem;
   box-shadow: var(--shadow);
+}
+
+.header-inner {
+  max-width: 1280px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.header-copy h1 {
+  margin: 0 0 0.25rem;
+  font-size: 1.6rem;
+}
+
+.header-copy p {
+  margin: 0;
+  opacity: 0.9;
+}
+
+.btn-dashboard {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.7rem 1.1rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+  color: white;
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 0.92rem;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  backdrop-filter: blur(8px);
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.btn-dashboard:hover {
+  background: rgba(255, 255, 255, 0.22);
+  transform: translateY(-1px);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.18);
 }
 
 header h1 {
