@@ -112,6 +112,8 @@ def simulate_purchase_order(body: SimulatePurchaseOrderRequest, db: Session = De
         result = order_service.process_inbound_po(payload, source="SIMULATION")
     except EdiValidationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     order = OrderRepository(db).get_order_by_id(result["order_id"])
     if order is None:

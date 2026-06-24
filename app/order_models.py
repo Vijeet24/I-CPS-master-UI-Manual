@@ -22,9 +22,9 @@ class MessageDirection(str, enum.Enum):
 
 
 class EpcStatus(str, enum.Enum):
-    AVAILABLE = "available"
-    ALLOCATED = "allocated"
-    SHIPPED = "shipped"
+    AVAILABLE = "AVAILABLE"
+    ALLOCATED = "ALLOCATED"
+    SHIPPED = "SHIPPED"
 
 
 class VerificationResult(str, enum.Enum):

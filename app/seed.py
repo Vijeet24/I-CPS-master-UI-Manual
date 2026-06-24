@@ -3,6 +3,43 @@ from sqlalchemy.orm import Session
 from app.models import Brand, Category, Product, Subcategory
 from app.order_models import EpcInventory, EpcStatus
 
+SAMPLE_GTIN = "00012345678936"
+MIN_AVAILABLE_EPCS = 10
+
+
+def _max_epc_suffix(db: Session, gtin: str) -> int:
+    max_suffix = 399
+    for row in db.query(EpcInventory).filter(EpcInventory.gtin == gtin).all():
+        try:
+            max_suffix = max(max_suffix, int(row.epc.rsplit(".", 1)[-1]))
+        except ValueError:
+            continue
+    return max_suffix
+
+
+def ensure_epc_inventory(db: Session, gtin: str = SAMPLE_GTIN, min_available: int = MIN_AVAILABLE_EPCS) -> int:
+    """Ensure at least min_available EPCs are in AVAILABLE status for demo/simulation."""
+    available_count = (
+        db.query(EpcInventory)
+        .filter(EpcInventory.gtin == gtin, EpcInventory.status == EpcStatus.AVAILABLE)
+        .count()
+    )
+    if available_count >= min_available:
+        return available_count
+
+    needed = min_available - available_count
+    suffix = _max_epc_suffix(db, gtin) + 1
+    added = 0
+    while added < needed:
+        epc = f"urn:epc:id:sgtin:0614141.112345.{suffix}"
+        existing = db.query(EpcInventory).filter(EpcInventory.epc == epc).first()
+        if existing is None:
+            db.add(EpcInventory(epc=epc, gtin=gtin, status=EpcStatus.AVAILABLE))
+            added += 1
+        suffix += 1
+    db.flush()
+    return available_count + added
+
 
 def seed_reference_data(db: Session) -> None:
     brand = db.query(Brand).filter(Brand.brand_name == "MedSupply Co").first()
@@ -31,11 +68,10 @@ def seed_reference_data(db: Session) -> None:
         .first()
     )
 
-    sample_gtin = "00012345678936"
-    product = db.query(Product).filter(Product.gtin_14 == sample_gtin).first()
+    product = db.query(Product).filter(Product.gtin_14 == SAMPLE_GTIN).first()
     if product is None:
         product = Product(
-            gtin_14=sample_gtin,
+            gtin_14=SAMPLE_GTIN,
             product_name="Oxygen Sensor",
             description="Medical-grade oxygen sensor for ICU monitoring",
             category_id=sensors.id,
@@ -49,10 +85,5 @@ def seed_reference_data(db: Session) -> None:
         db.add(product)
         db.flush()
 
-    for suffix in range(400, 405):
-        epc = f"urn:epc:id:sgtin:0614141.112345.{suffix}"
-        existing = db.query(EpcInventory).filter(EpcInventory.epc == epc).first()
-        if existing is None:
-            db.add(EpcInventory(epc=epc, gtin=sample_gtin, status=EpcStatus.AVAILABLE))
-
+    ensure_epc_inventory(db, gtin=SAMPLE_GTIN, min_available=MIN_AVAILABLE_EPCS)
     db.commit()
